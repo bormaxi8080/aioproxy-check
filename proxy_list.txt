@@ -1,0 +1,3 @@
+http://login:password@host:port
+http://login:password@host:port
+http://login:password@host:port
