@@ -11,3 +11,10 @@ Check Proxy List script with AsyncIO
 > python3 aioproxy_check_forwarded.py
 
 (for forwarded proxies)
+
+### Result:
+
+![alt text](result1.jpg)
+
+![alt text](result2.jpg)
+
