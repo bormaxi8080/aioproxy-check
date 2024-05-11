@@ -16,5 +16,5 @@ Check Proxy List script with AsyncIO
 
 ![alt text](result1.jpg)
 
-![alt text](result2.jpg)
+![alt text](result2.png)
 
