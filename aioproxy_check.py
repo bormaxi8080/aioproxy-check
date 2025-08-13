@@ -17,7 +17,7 @@ async def main():
     oks = 0
     bads = 0
 
-    with open("proxy_list.txt", "r") as proxy_file:  # real: proxies.txt
+    with open("proxies.txt", "r") as proxy_file:  # example: proxy_list.txt
         for line in proxy_file:
             proxy_list.append(line.strip())
 
