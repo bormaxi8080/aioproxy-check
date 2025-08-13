@@ -1,6 +1,5 @@
 import aiohttp
 import asyncio
-import json
 
 
 async def get_starship(proxy: str):

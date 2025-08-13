@@ -1,6 +1,5 @@
 import aiohttp
 import asyncio
-import json
 
 
 async def get_starship(proxy: str):
@@ -18,7 +17,7 @@ async def main():
     oks = 0
     bads = 0
 
-    with open("proxy_list.txt", "r") as proxy_file:
+    with open("proxy_list.txt", "r") as proxy_file:  # real: proxies.txt
         for line in proxy_file:
             proxy_list.append(line.strip())
 
