@@ -10,7 +10,7 @@ from datetime import datetime
 
 # ------------------- CONFIGURATION -------------------
 PROXY_FILE = "proxies.txt"                     # File with a proxy list
-OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with resolved IP
+OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with all observed IPs
 OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
 BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
 LOG_FILE = "actions.log"                       # Log file name
@@ -89,7 +89,7 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
     """
     Run a single iteration of proxy checks.
     Side effects:
-      - Updates all_ok_proxies: dict {proxy: ip}
+      - Updates all_ok_proxies: dict {proxy: [ip1, ip2, ...]} (all observed IPs)
       - Updates bad_proxy_stats: dict {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
     """
     oks = 0
@@ -108,7 +108,11 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
             ip = result["message"]["ip"]
             logger.info(f"OK: {proxy} -> IP: {ip}")
             oks += 1
-            all_ok_proxies[proxy] = ip  # remember latest observed IP per proxy
+            # Store all observed IPs in a list without duplicates
+            if proxy not in all_ok_proxies:
+                all_ok_proxies[proxy] = []
+            if ip not in all_ok_proxies[proxy]:
+                all_ok_proxies[proxy].append(ip)
         else:
             err = result["message"]
             logger.warning(f"BAD: {proxy} -> {err}")
@@ -144,7 +148,7 @@ async def main():
 
     total_oks = 0
     total_bads = 0
-    all_ok_proxies = {}   # {proxy: ip}
+    all_ok_proxies = {}   # {proxy: [ip1, ip2, ...]}
     bad_proxy_stats = {}  # {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
 
     # Multiple iterations
@@ -154,9 +158,9 @@ async def main():
         total_bads += bads
 
     # ---- Write GOOD proxies to two files ----
-    # 1) Proxies WITH IP
+    # 1) Proxies WITH all observed IPs
     Path(OK_PROXIES_WITH_IP_FILE).write_text(
-        "\n".join(f"{proxy} -> {ip}" for proxy, ip in sorted(all_ok_proxies.items())),
+        "\n".join(f"{proxy} -> {all_ok_proxies[proxy]}" for proxy in sorted(all_ok_proxies.keys())),
         encoding="utf-8",
     )
 
@@ -189,7 +193,7 @@ async def main():
     logger.info(f"Total OK: {total_oks}")
     logger.info(f"Total BAD: {total_bads}")
     logger.info(f"Success rate: {success_rate}%")
-    logger.info(f"Working proxies with IP saved to {OK_PROXIES_WITH_IP_FILE}")
+    logger.info(f"Working proxies with IPs saved to {OK_PROXIES_WITH_IP_FILE}")
     logger.info(f"Working proxies only saved to {OK_PROXIES_FILE}")
     logger.info(f"Never-successful proxies saved to {BAD_PROXIES_FILE}")
     logger.info("=" * 50)
