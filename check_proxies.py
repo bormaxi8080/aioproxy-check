@@ -3,21 +3,22 @@ import asyncio
 import ssl
 import certifi
 import logging
-
 from tqdm import tqdm
 from colorama import Fore, Style, init as colorama_init
 from pathlib import Path
+from datetime import datetime
 
 # ------------------- CONFIGURATION -------------------
-PROXY_FILE = "proxies.txt"            # File with a proxy list
-OK_PROXIES_FILE = "ok_proxies.txt"    # File to store successful proxies with IP
-BAD_PROXIES_FILE = "bad_proxies.txt"  # File to store proxies that never returned an IP
-LOG_FILE = "actions.log"              # Log file name
-ITERATIONS = 5                        # Number of proxy check iterations
-TIMEOUT = 5                           # Request timeout in seconds
+PROXY_FILE = "proxies.txt"                     # File with a proxy list
+OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with resolved IP
+OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
+BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
+LOG_FILE = "actions.log"                       # Log file name
+ITERATIONS = 5                                  # Number of proxy check iterations
+TIMEOUT = 5                                     # Request timeout in seconds
 # ------------------------------------------------------
 
-# Initialize colorama for colored output
+# Initialize colorama for colored console output
 colorama_init(autoreset=True)
 
 # Create SSL context using certifi CA bundle
@@ -27,7 +28,7 @@ ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 logger = logging.getLogger("ProxyChecker")
 logger.setLevel(logging.DEBUG)
 
-# Log to file (detailed)
+# File logging (detailed)
 file_handler = logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
 file_handler.setLevel(logging.DEBUG)
 file_formatter = logging.Formatter(
@@ -35,19 +36,19 @@ file_formatter = logging.Formatter(
 )
 file_handler.setFormatter(file_formatter)
 
-# Log to console (colored)
+# Console logging (colored)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
 
 class ColorFormatter(logging.Formatter):
-    """Custom formatter to add colors to log levels in console output."""
+    """Custom formatter to add colors to console log levels."""
     COLORS = {
         logging.DEBUG: Style.DIM,
         logging.INFO: Fore.CYAN,
         logging.WARNING: Fore.YELLOW,
         logging.ERROR: Fore.RED,
-        logging.CRITICAL: Fore.RED + Style.BRIGHT
+        logging.CRITICAL: Fore.RED + Style.BRIGHT,
     }
 
     def format(self, record):
@@ -58,15 +59,18 @@ class ColorFormatter(logging.Formatter):
 console_formatter = ColorFormatter("%(message)s")
 console_handler.setFormatter(console_formatter)
 
-# Attach handlers
+# Attach handlers to logger
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 
 async def check_proxy(proxy: str):
     """
-    Attempt to connect to https://api.ipify.org through the given proxy.
-    Returns a dict with status, message and proxy string.
+    Try connecting to https://api.ipify.org through the provided proxy.
+    Returns:
+        dict: {status: bool, message: dict|str, proxy: str}
+              - On success: message is a dict with key "ip"
+              - On failure: message is an error string
     """
     async with aiohttp.ClientSession() as session:
         try:
@@ -74,26 +78,26 @@ async def check_proxy(proxy: str):
                 url="https://api.ipify.org?format=json",
                 proxy=proxy,
                 ssl=ssl_ctx,
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             ) as response:
                 return {"status": True, "message": await response.json(), "proxy": proxy}
         except Exception as e:
             return {"status": False, "message": str(e), "proxy": proxy}
 
 
-async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_stats):
+async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_stats):
     """
-    Run a single iteration of proxy checking.
-    Logs results to both console and file.
-    Updates:
-      - all_ok_proxies: dict {proxy: ip} for successful ones
-      - bad_stats: dict {proxy: {"fails": int, "last_error": str}}
+    Run a single iteration of proxy checks.
+    Side effects:
+      - Updates all_ok_proxies: dict {proxy: ip}
+      - Updates bad_proxy_stats: dict {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
     """
     oks = 0
     bads = 0
     tasks = [check_proxy(proxy) for proxy in proxy_list]
-
     results = []
+
+    # Progress over concurrently completed tasks
     for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Iteration {iteration_num}"):
         result = await coro
         results.append(result)
@@ -104,28 +108,29 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_stats):
             ip = result["message"]["ip"]
             logger.info(f"OK: {proxy} -> IP: {ip}")
             oks += 1
-            all_ok_proxies[proxy] = ip  # store proxy-IP pair
+            all_ok_proxies[proxy] = ip  # remember latest observed IP per proxy
         else:
-            logger.warning(f"BAD: {proxy} -> {result['message']}")
+            err = result["message"]
+            logger.warning(f"BAD: {proxy} -> {err}")
             bads += 1
-            # Increment fail counter and store the last error
-            if proxy not in bad_stats:
-                bad_stats[proxy] = {"fails": 0, "last_error": ""}
-            bad_stats[proxy]["fails"] += 1
-            bad_stats[proxy]["last_error"] = result["message"]
+            if proxy not in bad_proxy_stats:
+                bad_proxy_stats[proxy] = {"fail_count": 0, "last_error": "", "last_check": ""}
+            bad_proxy_stats[proxy]["fail_count"] += 1
+            bad_proxy_stats[proxy]["last_error"] = str(err)
+            bad_proxy_stats[proxy]["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     logger.info(
-        f"Iteration {iteration_num} summary: OKS: {oks}({round(oks / len(proxy_list) * 100)}%) / "
-        f"BADS: {bads}({round(bads / len(proxy_list) * 100)}%)"
+        f"Iteration {iteration_num} summary: "
+        f"OK: {oks} ({round(oks / len(proxy_list) * 100)}%) / "
+        f"BAD: {bads} ({round(bads / len(proxy_list) * 100)}%)"
     )
-
     return oks, bads
 
 
 async def main():
-    # Load the proxy list from a file
+    # Load proxies from file
     try:
-        with open(PROXY_FILE, "r") as f:
+        with open(PROXY_FILE, "r", encoding="utf-8") as f:
             proxy_list = [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
         logger.error(f"Proxy file '{PROXY_FILE}' not found.")
@@ -139,36 +144,42 @@ async def main():
 
     total_oks = 0
     total_bads = 0
-    all_ok_proxies = {}  # {proxy: ip}
-    bad_stats = {}       # {proxy: {"fails": int, "last_error": str}}
+    all_ok_proxies = {}   # {proxy: ip}
+    bad_proxy_stats = {}  # {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
 
-    # Run multiple iterations
+    # Multiple iterations
     for i in range(1, ITERATIONS + 1):
-        oks, bads = await run_iteration(proxy_list, i, all_ok_proxies, bad_stats)
+        oks, bads = await run_iteration(proxy_list, i, all_ok_proxies, bad_proxy_stats)
         total_oks += oks
         total_bads += bads
 
-    # Save unique successful proxies to a file
-    Path(OK_PROXIES_FILE).write_text(
+    # ---- Write GOOD proxies to two files ----
+    # 1) Proxies WITH IP
+    Path(OK_PROXIES_WITH_IP_FILE).write_text(
         "\n".join(f"{proxy} -> {ip}" for proxy, ip in sorted(all_ok_proxies.items())),
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
-    # Save proxies that NEVER returned an IP
+    # 2) Proxies ONLY (no IPs)
+    Path(OK_PROXIES_FILE).write_text(
+        "\n".join(proxy for proxy in sorted(all_ok_proxies.keys())),
+        encoding="utf-8",
+    )
+
+    # ---- Write NEVER-SUCCESSFUL proxies (sorted by fails desc) ----
     never_ok = {
-        proxy: data
-        for proxy, data in bad_stats.items()
+        proxy: stats
+        for proxy, stats in bad_proxy_stats.items()
         if proxy not in all_ok_proxies
     }
-    Path(BAD_PROXIES_FILE).write_text(
-        "\n".join(
-            f"{proxy} | fails: {data['fails']} | last_error: {data['last_error']}"
-            for proxy, data in sorted(never_ok.items())
-        ),
-        encoding="utf-8"
-    )
+    with open(BAD_PROXIES_FILE, "w", encoding="utf-8") as f:
+        for proxy, stats in sorted(never_ok.items(), key=lambda x: x[1]["fail_count"], reverse=True):
+            f.write(
+                f"{proxy} | Fails: {stats['fail_count']} | "
+                f"Last error: {stats['last_error']} | Last check: {stats['last_check']}\n"
+            )
 
-    # Log final summary
+    # Final summary
     total_checks = total_oks + total_bads
     success_rate = round(total_oks / total_checks * 100) if total_checks else 0
 
@@ -178,7 +189,8 @@ async def main():
     logger.info(f"Total OK: {total_oks}")
     logger.info(f"Total BAD: {total_bads}")
     logger.info(f"Success rate: {success_rate}%")
-    logger.info(f"Unique successful proxies saved to {OK_PROXIES_FILE}")
+    logger.info(f"Working proxies with IP saved to {OK_PROXIES_WITH_IP_FILE}")
+    logger.info(f"Working proxies only saved to {OK_PROXIES_FILE}")
     logger.info(f"Never-successful proxies saved to {BAD_PROXIES_FILE}")
     logger.info("=" * 50)
 
