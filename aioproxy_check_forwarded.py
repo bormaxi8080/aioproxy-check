@@ -1,14 +1,5 @@
-import aiohttp
 import asyncio
-
-
-async def get_starship(proxy: str):
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url=f'https://api.ipify.org?format=json', proxy=proxy, timeout=5) as response:
-                return {"status": True, "message": await response.json(), "proxy": proxy}
-        except Exception as e:
-            return {"status": False, "message": e, "proxy": proxy}
+from utils import get_starship
 
 
 async def main():
