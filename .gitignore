@@ -7,5 +7,6 @@ proxies.txt
 proxies*.txt
 
 ok_proxies.txt
+bad_proxies.txt
 
 __pycache__
