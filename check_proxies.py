@@ -14,8 +14,8 @@ OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with all o
 OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
 BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
 LOG_FILE = "actions.log"                       # Log file name
-ITERATIONS = 5                                  # Number of proxy check iterations
-TIMEOUT = 5                                     # Request timeout in seconds
+ITERATIONS = 10                                # Number of proxy check iterations
+TIMEOUT = 5                                    # Request timeout in seconds
 # ------------------------------------------------------
 
 # Initialize colorama for colored console output
