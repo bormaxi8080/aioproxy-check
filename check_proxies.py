@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 # ------------------- CONFIGURATION -------------------
-PROXY_FILE = "proxies.txt"                     # File with a proxy list
+PROXY_FILE = "proxies_all.txt"                     # File with a proxy list
 OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with all observed IPs
 OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
 BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
