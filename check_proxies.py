@@ -1,12 +1,16 @@
-import aiohttp
+"""Asynchronously check proxy lists and record results."""
+
 import asyncio
-import ssl
-import certifi
+import json
 import logging
-from tqdm import tqdm
-from colorama import Fore, Style, init as colorama_init
-from pathlib import Path
+import ssl
 from datetime import datetime
+from pathlib import Path
+
+import aiohttp
+import certifi
+from colorama import Fore, Style, init as colorama_init
+from tqdm import tqdm
 
 # ------------------- CONFIGURATION -------------------
 PROXY_FILE = "proxies_all.txt"                     # File with a proxy list
@@ -81,7 +85,12 @@ async def check_proxy(proxy: str):
                 timeout=TIMEOUT,
             ) as response:
                 return {"status": True, "message": await response.json(), "proxy": proxy}
-        except Exception as e:
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            json.JSONDecodeError,
+            ssl.SSLError,
+        ) as e:
             return {"status": False, "message": str(e), "proxy": proxy}
 
 
@@ -90,7 +99,9 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
     Run a single iteration of proxy checks.
     Side effects:
       - Updates all_ok_proxies: dict {proxy: [ip1, ip2, ...]} (all observed IPs)
-      - Updates bad_proxy_stats: dict {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
+      - Updates bad_proxy_stats: dict {
+          proxy: {"fail_count": int, "last_error": str, "last_check": str}
+        }
     """
     oks = 0
     bads = 0
@@ -98,7 +109,11 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
     results = []
 
     # Progress over concurrently completed tasks
-    for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Iteration {iteration_num}"):
+    for coro in tqdm(
+        asyncio.as_completed(tasks),
+        total=len(tasks),
+        desc=f"Iteration {iteration_num}",
+    ):
         result = await coro
         results.append(result)
 
@@ -106,7 +121,7 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
         proxy = result["proxy"]
         if result["status"] and isinstance(result["message"], dict) and "ip" in result["message"]:
             ip = result["message"]["ip"]
-            logger.info(f"OK: {proxy} -> IP: {ip}")
+            logger.info("OK: %s -> IP: %s", proxy, ip)
             oks += 1
             # Store all observed IPs in a list without duplicates
             if proxy not in all_ok_proxies:
@@ -115,7 +130,7 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
                 all_ok_proxies[proxy].append(ip)
         else:
             err = result["message"]
-            logger.warning(f"BAD: {proxy} -> {err}")
+            logger.warning("BAD: %s -> %s", proxy, err)
             bads += 1
             if proxy not in bad_proxy_stats:
                 bad_proxy_stats[proxy] = {"fail_count": 0, "last_error": "", "last_check": ""}
@@ -123,28 +138,34 @@ async def run_iteration(proxy_list, iteration_num, all_ok_proxies, bad_proxy_sta
             bad_proxy_stats[proxy]["last_error"] = str(err)
             bad_proxy_stats[proxy]["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    oks_percent = round(oks / len(proxy_list) * 100)
+    bads_percent = round(bads / len(proxy_list) * 100)
     logger.info(
-        f"Iteration {iteration_num} summary: "
-        f"OK: {oks} ({round(oks / len(proxy_list) * 100)}%) / "
-        f"BAD: {bads} ({round(bads / len(proxy_list) * 100)}%)"
+        "Iteration %s summary: OK: %s (%s%%) / BAD: %s (%s%%)",
+        iteration_num,
+        oks,
+        oks_percent,
+        bads,
+        bads_percent,
     )
     return oks, bads
 
 
 async def main():
+    """Load proxies, run checks, and write summary output files."""
     # Load proxies from file
     try:
         with open(PROXY_FILE, "r", encoding="utf-8") as f:
             proxy_list = [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
-        logger.error(f"Proxy file '{PROXY_FILE}' not found.")
+        logger.error("Proxy file '%s' not found.", PROXY_FILE)
         return
 
     if not proxy_list:
         logger.error("Proxy list is empty.")
         return
 
-    logger.info(f"Loaded {len(proxy_list)} proxies from {PROXY_FILE}")
+    logger.info("Loaded %s proxies from %s", len(proxy_list), PROXY_FILE)
 
     total_oks = 0
     total_bads = 0
@@ -177,7 +198,11 @@ async def main():
         if proxy not in all_ok_proxies
     }
     with open(BAD_PROXIES_FILE, "w", encoding="utf-8") as f:
-        for proxy, stats in sorted(never_ok.items(), key=lambda x: x[1]["fail_count"], reverse=True):
+        for proxy, stats in sorted(
+            never_ok.items(),
+            key=lambda x: x[1]["fail_count"],
+            reverse=True,
+        ):
             f.write(
                 f"{proxy} | Fails: {stats['fail_count']} | "
                 f"Last error: {stats['last_error']} | Last check: {stats['last_check']}\n"
@@ -187,16 +212,16 @@ async def main():
     total_checks = total_oks + total_bads
     success_rate = round(total_oks / total_checks * 100) if total_checks else 0
 
-    logger.info("=" * 50)
-    logger.info(f"FINAL SUMMARY for {ITERATIONS} iterations:")
-    logger.info(f"Total checks: {total_checks}")
-    logger.info(f"Total OK: {total_oks}")
-    logger.info(f"Total BAD: {total_bads}")
-    logger.info(f"Success rate: {success_rate}%")
-    logger.info(f"Working proxies with IPs saved to {OK_PROXIES_WITH_IP_FILE}")
-    logger.info(f"Working proxies only saved to {OK_PROXIES_FILE}")
-    logger.info(f"Never-successful proxies saved to {BAD_PROXIES_FILE}")
-    logger.info("=" * 50)
+    logger.info("%s", "=" * 50)
+    logger.info("FINAL SUMMARY for %s iterations:", ITERATIONS)
+    logger.info("Total checks: %s", total_checks)
+    logger.info("Total OK: %s", total_oks)
+    logger.info("Total BAD: %s", total_bads)
+    logger.info("Success rate: %s%%", success_rate)
+    logger.info("Working proxies with IPs saved to %s", OK_PROXIES_WITH_IP_FILE)
+    logger.info("Working proxies only saved to %s", OK_PROXIES_FILE)
+    logger.info("Never-successful proxies saved to %s", BAD_PROXIES_FILE)
+    logger.info("%s", "=" * 50)
 
 
 if __name__ == "__main__":

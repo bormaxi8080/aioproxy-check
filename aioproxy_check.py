@@ -12,7 +12,7 @@ async def main():
     oks = 0
     bads = 0
 
-    with open("proxies.txt", "r", encoding="utf-8") as proxy_file:  # example: proxy_list.txt
+    with open("proxies_all.txt", "r", encoding="utf-8") as proxy_file:  # example: proxy_list.txt
         for line in proxy_file:
             proxy_list.append(line.strip())
 
