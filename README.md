@@ -2,7 +2,7 @@
 
 Check Proxy List script with AsyncIO
 
-### Usage:
+## Usage
 
 > python3 aioproxy_check.py
 
@@ -12,9 +12,8 @@ Check Proxy List script with AsyncIO
 
 (for forwarded proxies)
 
-### Result:
+## Result
 
 ![alt text](result1.jpg)
 
 ![alt text](result2.png)
-
