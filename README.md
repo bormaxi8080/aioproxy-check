@@ -17,3 +17,8 @@ Check Proxy List script with AsyncIO
 ![alt text](result1.jpg)
 
 ![alt text](result2.png)
+
+## Donates
+
+[![Buy Me a Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/bormaxi8080)
+
