@@ -2,13 +2,47 @@
 
 Check Proxy List script with AsyncIO
 
+## Install
+
+> uv venv .venv --python 3.12
+
+> source .venv/bin/activate
+
+> uv pip install --python .venv/bin/python --upgrade -r requirements.txt
+
+> python --version
+
 ## Usage
 
-> python3 aioproxy_check.py
+> python aioproxy_check.py my_proxies.txt
 
-(proxy list is in the proxy_list.txt file)
+(proxy list file should be in `proxy/my_proxies.txt`)
 
-> python3 aioproxy_check_forwarded.py
+> python aioproxy_check.py my_proxies.txt --proxy-type socks4
+
+> python check_proxies.py my_proxies.txt
+
+(extended checker, proxy list file should be in `proxy/my_proxies.txt`)
+
+> python check_proxies.py my_proxies.txt --proxy-type socks5
+
+(`--proxy-type`: `http` by default, or `socks4` / `socks5`; for lines without scheme script prepends selected type)
+
+> python check_proxies.py my_proxies.txt --iterations 3
+
+> python aioproxy_check.py my_proxies.txt --iterations 3
+
+(`--iterations`: number of check rounds, default is `1`)
+
+> python check_proxies.py my_proxies.txt --resolve-location
+
+> python check_proxies.py my_proxies.txt --no-resolve-location
+
+(`--resolve-location`: enabled by default; when enabled, `ok_proxies_with_ip.txt` contains IP + country code, e.g. `1.2.3.4 (DE)`)
+
+> python aioproxy_check.py my_proxies.txt --no-resolve-location
+
+> python aioproxy_check_forwarded.py
 
 (for forwarded proxies)
 

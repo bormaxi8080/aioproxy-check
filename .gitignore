@@ -12,3 +12,5 @@ ok_proxies_with_ip.txt
 bad_proxies.txt
 
 __pycache__
+proxy/
+.uv-cache/

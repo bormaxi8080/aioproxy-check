@@ -1,4 +1,5 @@
-colorama
-tqdm
-certifi
-aiohttp
+uv==0.11.7
+colorama==0.4.6
+tqdm==4.67.3
+certifi==2026.2.25
+aiohttp==3.13.5
