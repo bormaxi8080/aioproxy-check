@@ -3,3 +3,4 @@ colorama==0.4.6
 tqdm==4.67.3
 certifi==2026.2.25
 aiohttp==3.13.5
+aiohttp-socks==0.10.1

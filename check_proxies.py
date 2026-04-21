@@ -16,9 +16,19 @@ import certifi
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
 
+try:
+    from aiohttp_socks import ProxyConnector
+    from python_socks import ProxyError as SocksProxyError
+except ImportError:
+    ProxyConnector = None
+
+    class SocksProxyError(Exception):
+        """Fallback SOCKS exception type when optional deps are missing."""
+
 # ------------------- CONFIGURATION -------------------
 PROXY_DIR = Path("proxy")                       # Folder with proxy lists
 PROXY_TYPES = ("http", "socks4", "socks5")
+PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 CHECK_SERVICE_URL = "https://api.myip.com"
 GEOLOOKUP_URL = "https://ipwho.is/{ip}"
 GEO_CACHE_FILE = "geo_ip_cache.json"
@@ -188,12 +198,20 @@ def normalize_proxy(proxy: str, proxy_type: str) -> str:
     if lowered.startswith("host:port") and "login" in lowered and "pass" in lowered:
         return ""
 
+    scheme = proxy_type.lower()
+    value = stripped
+
     if "://" in stripped:
-        return stripped
+        raw_scheme, value = stripped.split("://", 1)
+        lowered_scheme = raw_scheme.lower()
+        if lowered_scheme in PROXY_SCHEMES:
+            scheme = lowered_scheme
+        else:
+            return stripped
 
     auth_match = re.fullmatch(
-        r"(?P<host>[^:\s]+):(?P<port>\d{1,5}):(?P<login>[^:\s]+):(?P<password>[^:\s]+)",
-        stripped,
+        r"(?P<host>[^:\s@]+):(?P<port>\d{1,5}):(?P<login>[^:\s]+):(?P<password>[^:\s]+)",
+        value,
     )
     if auth_match:
         port = int(auth_match.group("port"))
@@ -201,11 +219,36 @@ def normalize_proxy(proxy: str, proxy_type: str) -> str:
             login = quote(auth_match.group("login"), safe="")
             password = quote(auth_match.group("password"), safe="")
             return (
-                f"{proxy_type}://{login}:{password}"
+                f"{scheme}://{login}:{password}"
                 f"@{auth_match.group('host')}:{port}"
             )
 
-    return f"{proxy_type}://{stripped}"
+    auth_url_match = re.fullmatch(
+        r"(?P<login>[^:\s@]+):(?P<password>[^@\s]+)@(?P<host>[^:\s@]+):(?P<port>\d{1,5})",
+        value,
+    )
+    if auth_url_match:
+        port = int(auth_url_match.group("port"))
+        if 1 <= port <= 65535:
+            login = quote(auth_url_match.group("login"), safe="")
+            password = quote(auth_url_match.group("password"), safe="")
+            return (
+                f"{scheme}://{login}:{password}"
+                f"@{auth_url_match.group('host')}:{port}"
+            )
+
+    host_port_match = re.fullmatch(
+        r"(?P<host>[^:\s@]+):(?P<port>\d{1,5})",
+        value,
+    )
+    if host_port_match:
+        port = int(host_port_match.group("port"))
+        if 1 <= port <= 65535:
+            return f"{scheme}://{host_port_match.group('host')}:{port}"
+
+    if "://" in stripped:
+        return stripped
+    return f"{scheme}://{value}"
 
 
 def extract_ip_from_response(response_body: str):
@@ -262,16 +305,42 @@ async def check_proxy(
     retry_backoff: float,
 ):
     """Try connecting to the check URL through the provided proxy."""
+    proxy_scheme = proxy.split("://", 1)[0].lower() if "://" in proxy else "http"
+    is_socks_proxy = proxy_scheme in {"socks4", "socks5"}
+
     for attempt in range(retries + 1):
         try:
             async with semaphore:
-                async with session.get(
-                    url=check_url,
-                    proxy=proxy,
-                    ssl=ssl_ctx,
-                ) as response:
-                    response.raise_for_status()
-                    body = await response.text()
+                if is_socks_proxy:
+                    if ProxyConnector is None:
+                        return {
+                            "status": False,
+                            "message": (
+                                "SOCKS proxy support requires aiohttp-socks package. "
+                                "Install dependencies from requirements.txt"
+                            ),
+                            "proxy": proxy,
+                        }
+
+                    connector = ProxyConnector.from_url(proxy)
+                    async with aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=session.timeout,
+                    ) as socks_session:
+                        async with socks_session.get(
+                            url=check_url,
+                            ssl=ssl_ctx,
+                        ) as response:
+                            response.raise_for_status()
+                            body = await response.text()
+                else:
+                    async with session.get(
+                        url=check_url,
+                        proxy=proxy,
+                        ssl=ssl_ctx,
+                    ) as response:
+                        response.raise_for_status()
+                        body = await response.text()
             ip = extract_ip_from_response(body)
             if ip is None:
                 return {
@@ -286,6 +355,8 @@ async def check_proxy(
             aiohttp.ClientError,
             asyncio.TimeoutError,
             ssl.SSLError,
+            SocksProxyError,
+            OSError,
         ) as error:
             if attempt < retries:
                 await asyncio.sleep(retry_backoff * (attempt + 1))
@@ -643,6 +714,10 @@ async def main():
     if args.geo_rps < 0:
         logger.error("geo-rps must be >= 0.")
         return
+    check_url_lower = args.check_url.lower()
+    if not check_url_lower.startswith(("http://", "https://")):
+        logger.error("check-url must start with http:// or https://")
+        return
 
     proxy_file = PROXY_DIR / Path(args.proxy_file_name).name
 
@@ -666,7 +741,7 @@ async def main():
         return
 
     logger.info(
-        "Loaded %s proxies from %s (proxy_type=%s)",
+        "Loaded %s proxies from %s (default_type_for_scheme_less=%s)",
         len(proxy_list),
         proxy_file,
         args.proxy_type,

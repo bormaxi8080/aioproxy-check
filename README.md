@@ -26,13 +26,19 @@ Check Proxy List script with AsyncIO
 
 > python check_proxies.py my_proxies.txt --proxy-type socks5
 
-(`--proxy-type`: `http` by default, or `socks4` / `socks5`; for lines without scheme script prepends selected type)
+(`--proxy-type`: fallback type only for lines without scheme; default is `http`)
+
+> python check_proxies.py proxy.enabled.socks5.kuvalda.msk.txt
+
+(for lines with explicit scheme `socks4://...` / `socks5://...`, protocol is auto-detected from each line)
 
 > python check_proxies.py my_proxies.txt --check-url https://api.myip.com
 
 > python check_proxies.py my_proxies.txt --check-url https://api.ipify.org?format=json
 
 (`--check-url`: proxy egress IP check service URL, default is `https://api.myip.com`)
+
+(`--check-url` supports both `http://` and `https://`; with `https://` you validate HTTPS path through proxy tunnel)
 
 > python check_proxies.py my_proxies.txt --max-concurrency 200 --retries 1 --retry-backoff 0.2
 
@@ -67,6 +73,17 @@ Check Proxy List script with AsyncIO
 (`--geo-rps`: throttle geolocation request rate; `0` disables throttling, default `5.0`)
 
 (`--geo-cache-file`: local append-only JSON cache for resolved IP countries; reused between runs)
+
+### Proxy line formats supported by `check_proxies.py`
+
+- `http://host:port`
+- `http://login:pass@host:port`
+- `socks4://host:port`
+- `socks5://host:port`
+- `host:port` (scheme-less, fallback `http` unless overridden by `--proxy-type`)
+- `host:port:login:pass` (scheme-less, fallback `http` unless overridden by `--proxy-type`)
+- `socks5://host:port:login:pass` (normalized to `socks5://login:pass@host:port`)
+- `socks4://host:port:login:pass` (normalized to `socks4://login:pass@host:port`)
 
 > python aioproxy_check.py my_proxies.txt --no-resolve-location
 
