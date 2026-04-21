@@ -28,11 +28,27 @@ Check Proxy List script with AsyncIO
 
 (`--proxy-type`: `http` by default, or `socks4` / `socks5`; for lines without scheme script prepends selected type)
 
+> python check_proxies.py my_proxies.txt --check-url https://api.myip.com
+
+> python check_proxies.py my_proxies.txt --check-url https://api.ipify.org?format=json
+
+(`--check-url`: proxy egress IP check service URL, default is `https://api.myip.com`)
+
+> python check_proxies.py my_proxies.txt --max-concurrency 200 --retries 1 --retry-backoff 0.2
+
+(`--max-concurrency`: limit simultaneous checks to avoid socket exhaustion, default `200`)
+
+(`--retries`: additional retry attempts on transient network errors, default `1`)
+
+(`--retry-backoff`: base delay in seconds between retries, default `0.2`)
+
 > python check_proxies.py my_proxies.txt --iterations 3
 
 > python aioproxy_check.py my_proxies.txt --iterations 3
 
 (`--iterations`: number of check rounds, default is `1`)
+
+> python aioproxy_check.py my_proxies.txt --check-url https://api.myip.com
 
 > python check_proxies.py my_proxies.txt --resolve-location
 
