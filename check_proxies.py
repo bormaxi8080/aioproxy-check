@@ -21,6 +21,7 @@ PROXY_DIR = Path("proxy")                       # Folder with proxy lists
 PROXY_TYPES = ("http", "socks4", "socks5")
 CHECK_SERVICE_URL = "https://api.myip.com"
 GEOLOOKUP_URL = "https://ipwho.is/{ip}"
+GEO_CACHE_FILE = "geo_ip_cache.json"
 OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with all observed IPs
 OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
 BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
@@ -29,6 +30,10 @@ TIMEOUT = 5                                    # Request timeout in seconds
 MAX_CONCURRENCY = 200                          # Max simultaneous proxy checks
 RETRIES = 1                                    # Additional retries per proxy check
 RETRY_BACKOFF = 0.2                            # Base retry delay in seconds
+GEO_MAX_CONCURRENCY = 20                       # Max simultaneous geolocation lookups
+GEO_RETRIES = 3                                # Additional retries for geolocation lookups
+GEO_RETRY_BACKOFF = 1.0                        # Base geolocation retry delay in seconds
+GEO_RPS = 5.0                                  # Rate limit for geolocation requests per second
 # ------------------------------------------------------
 
 # Initialize colorama for colored console output
@@ -129,6 +134,35 @@ def parse_args():
         type=float,
         default=RETRY_BACKOFF,
         help="Base retry delay in seconds (default: 0.2)",
+    )
+    parser.add_argument(
+        "--geo-max-concurrency",
+        type=int,
+        default=GEO_MAX_CONCURRENCY,
+        help="Maximum simultaneous geolocation lookups (default: 20)",
+    )
+    parser.add_argument(
+        "--geo-retries",
+        type=int,
+        default=GEO_RETRIES,
+        help="Additional retries for geolocation lookup errors (default: 3)",
+    )
+    parser.add_argument(
+        "--geo-retry-backoff",
+        type=float,
+        default=GEO_RETRY_BACKOFF,
+        help="Base geolocation retry delay in seconds (default: 1.0)",
+    )
+    parser.add_argument(
+        "--geo-rps",
+        type=float,
+        default=GEO_RPS,
+        help="Max geolocation requests per second, 0 disables throttling (default: 5.0)",
+    )
+    parser.add_argument(
+        "--geo-cache-file",
+        default=GEO_CACHE_FILE,
+        help="Path to local geolocation cache file (default: geo_ip_cache.json)",
     )
     return parser.parse_args()
 
@@ -259,31 +293,165 @@ async def check_proxy(
             return {"status": False, "message": format_error(error), "proxy": proxy}
 
 
-async def resolve_country_for_ip(ip: str, session: aiohttp.ClientSession) -> str:
-    """Resolve IP country code via public API."""
+class AsyncRateLimiter:
+    """Simple async rate limiter with a global minimum interval."""
+
+    def __init__(self, rate_per_second: float):
+        self.interval = 1.0 / rate_per_second if rate_per_second > 0 else 0.0
+        self._lock = asyncio.Lock()
+        self._next_allowed = 0.0
+
+    async def wait(self):
+        """Wait until the next request slot is available."""
+        if self.interval <= 0:
+            return
+
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            if now < self._next_allowed:
+                await asyncio.sleep(self._next_allowed - now)
+                now = loop.time()
+            self._next_allowed = max(self._next_allowed, now) + self.interval
+
+
+def load_ip_location_cache(cache_file: Path):
+    """Load geolocation cache from disk (legacy dict JSON and append-only JSON stream)."""
+    if not cache_file.exists():
+        return {}
+
     try:
-        async with session.get(
-            url=GEOLOOKUP_URL.format(ip=ip),
-            ssl=ssl_ctx,
-            timeout=TIMEOUT,
-        ) as response:
-            data = await response.json()
-    except (
-        aiohttp.ClientError,
-        asyncio.TimeoutError,
-        json.JSONDecodeError,
-        ssl.SSLError,
-    ) as error:
-        logger.debug("Location lookup failed for %s: %s", ip, error)
+        content = cache_file.read_text(encoding="utf-8")
+    except OSError as error:
+        logger.warning("Failed to read geo cache %s: %s", cache_file, error)
+        return {}
+
+    content = content.strip()
+    if not content:
+        return {}
+
+    cache = {}
+    decoder = json.JSONDecoder()
+    idx = 0
+    length = len(content)
+
+    while idx < length:
+        while idx < length and content[idx].isspace():
+            idx += 1
+        if idx >= length:
+            break
+
+        try:
+            value, next_idx = decoder.raw_decode(content, idx)
+        except json.JSONDecodeError as error:
+            logger.warning("Failed to parse geo cache %s near pos %s: %s", cache_file, idx, error)
+            break
+
+        if isinstance(value, dict):
+            # Legacy format: {"ip":"country", ...}
+            # Append-only format: {"ip":"1.2.3.4","country":"US"}
+            if "ip" in value and "country" in value:
+                ip = value.get("ip")
+                country = value.get("country")
+                if isinstance(ip, str) and isinstance(country, str) and country:
+                    cache[ip] = country.upper()
+            else:
+                for ip, country in value.items():
+                    if isinstance(ip, str) and isinstance(country, str) and country:
+                        cache[ip] = country.upper()
+
+        idx = next_idx
+
+    return cache
+
+
+def append_ip_location_cache(cache_file: Path, previous_cache, current_cache):
+    """Append only new/updated geolocation entries to cache file."""
+    to_append = []
+    for ip, country in current_cache.items():
+        if not (isinstance(ip, str) and isinstance(country, str) and country and country != "N/A"):
+            continue
+        if previous_cache.get(ip) == country:
+            continue
+        to_append.append({"ip": ip, "country": country})
+
+    if not to_append:
+        return 0
+
+    try:
+        prefix = ""
+        if cache_file.exists() and cache_file.stat().st_size > 0:
+            prefix = "\n"
+        with open(cache_file, "a", encoding="utf-8") as cache_fp:
+            if prefix:
+                cache_fp.write(prefix)
+            for entry in to_append:
+                cache_fp.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+                cache_fp.write("\n")
+        return len(to_append)
+    except OSError as error:
+        logger.warning("Failed to append geo cache %s: %s", cache_file, error)
+        return 0
+
+
+async def resolve_country_for_ip(
+    ip: str,
+    session: aiohttp.ClientSession,
+    geo_retries: int,
+    geo_retry_backoff: float,
+    rate_limiter: AsyncRateLimiter,
+) -> str:
+    """Resolve IP country code with retries and rate-limit handling."""
+    for attempt in range(geo_retries + 1):
+        try:
+            await rate_limiter.wait()
+            async with session.get(
+                url=GEOLOOKUP_URL.format(ip=ip),
+                ssl=ssl_ctx,
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            json.JSONDecodeError,
+            ssl.SSLError,
+        ) as error:
+            if attempt < geo_retries:
+                await asyncio.sleep(geo_retry_backoff * (attempt + 1))
+                continue
+            logger.debug("Location lookup failed for %s: %s", ip, format_error(error))
+            return "N/A"
+
+        if not isinstance(data, dict):
+            logger.debug("Location lookup returned unexpected payload for %s", ip)
+            return "N/A"
+
+        country = data.get("country_code")
+        if isinstance(country, str) and country:
+            return country.upper()
+
+        message = data.get("message")
+        if isinstance(message, str) and "rate limit" in message.lower() and attempt < geo_retries:
+            await asyncio.sleep(geo_retry_backoff * (attempt + 1))
+            continue
+
+        if isinstance(message, str):
+            logger.debug("Location lookup returned no country for %s: %s", ip, message)
         return "N/A"
 
-    country = data.get("country_code")
-    if isinstance(country, str) and country:
-        return country.upper()
     return "N/A"
 
 
-async def resolve_locations(ips, resolve_location: bool, ip_location_cache):
+async def resolve_locations(
+    ips,
+    resolve_location: bool,
+    ip_location_cache,
+    geo_max_concurrency: int,
+    geo_retries: int,
+    geo_retry_backoff: float,
+    geo_rps: float,
+):
     """Resolve locations for IPs and update cache."""
     if not resolve_location:
         return
@@ -292,10 +460,49 @@ async def resolve_locations(ips, resolve_location: bool, ip_location_cache):
     if not unresolved_ips:
         return
 
-    async with aiohttp.ClientSession() as session:
-        tasks = {ip: asyncio.create_task(resolve_country_for_ip(ip, session)) for ip in unresolved_ips}
-        for ip, task in tasks.items():
-            ip_location_cache[ip] = await task
+    if geo_rps > 0:
+        estimated_minutes = len(unresolved_ips) / geo_rps / 60
+        logger.info(
+            "Resolving geolocation for %s new IPs (rate=%.2f req/s, est ~%.1f min)",
+            len(unresolved_ips),
+            geo_rps,
+            estimated_minutes,
+        )
+    else:
+        logger.info(
+            "Resolving geolocation for %s new IPs (unthrottled mode)",
+            len(unresolved_ips),
+        )
+
+    semaphore = asyncio.Semaphore(geo_max_concurrency)
+    connector = aiohttp.TCPConnector(
+        limit=geo_max_concurrency,
+        limit_per_host=geo_max_concurrency,
+    )
+    client_timeout = aiohttp.ClientTimeout(total=TIMEOUT)
+    rate_limiter = AsyncRateLimiter(geo_rps)
+
+    async def lookup_ip(ip: str, session: aiohttp.ClientSession):
+        async with semaphore:
+            country = await resolve_country_for_ip(
+                ip,
+                session,
+                geo_retries,
+                geo_retry_backoff,
+                rate_limiter,
+            )
+            return ip, country
+
+    async with aiohttp.ClientSession(connector=connector, timeout=client_timeout) as session:
+        batch_size = max(geo_max_concurrency * 20, geo_max_concurrency)
+        with tqdm(total=len(unresolved_ips), desc="Geo lookup") as geo_progress:
+            for start in range(0, len(unresolved_ips), batch_size):
+                batch = unresolved_ips[start:start + batch_size]
+                tasks = [asyncio.create_task(lookup_ip(ip, session)) for ip in batch]
+                for task in asyncio.as_completed(tasks):
+                    ip, country = await task
+                    ip_location_cache[ip] = country
+                    geo_progress.update(1)
 
 
 async def run_iteration(
@@ -309,6 +516,10 @@ async def run_iteration(
     retry_backoff,
     resolve_location,
     ip_location_cache,
+    geo_max_concurrency,
+    geo_retries,
+    geo_retry_backoff,
+    geo_rps,
 ):
     """
     Run a single iteration of proxy checks.
@@ -357,7 +568,15 @@ async def run_iteration(
         for result in results
         if result["status"] and isinstance(result["message"], dict) and "ip" in result["message"]
     ]
-    await resolve_locations(iteration_ips, resolve_location, ip_location_cache)
+    await resolve_locations(
+        iteration_ips,
+        resolve_location,
+        ip_location_cache,
+        geo_max_concurrency,
+        geo_retries,
+        geo_retry_backoff,
+        geo_rps,
+    )
 
     for result in results:
         proxy = result["proxy"]
@@ -412,6 +631,18 @@ async def main():
     if args.retry_backoff < 0:
         logger.error("retry-backoff must be >= 0.")
         return
+    if args.geo_max_concurrency < 1:
+        logger.error("geo-max-concurrency must be >= 1.")
+        return
+    if args.geo_retries < 0:
+        logger.error("geo-retries must be >= 0.")
+        return
+    if args.geo_retry_backoff < 0:
+        logger.error("geo-retry-backoff must be >= 0.")
+        return
+    if args.geo_rps < 0:
+        logger.error("geo-rps must be >= 0.")
+        return
 
     proxy_file = PROXY_DIR / Path(args.proxy_file_name).name
 
@@ -447,6 +678,14 @@ async def main():
         args.retries,
         args.retry_backoff,
     )
+    logger.info(
+        "Geo settings: concurrency=%s, retries=%s, retry_backoff=%ss, rps=%s, cache=%s",
+        args.geo_max_concurrency,
+        args.geo_retries,
+        args.geo_retry_backoff,
+        args.geo_rps,
+        args.geo_cache_file,
+    )
     if skipped_lines:
         logger.info("Skipped %s non-proxy lines (headers/comments/empty).", skipped_lines)
 
@@ -454,7 +693,11 @@ async def main():
     total_bads = 0
     all_ok_proxies = {}   # {proxy: {ip1: country1, ip2: country2}}
     bad_proxy_stats = {}  # {proxy: {"fail_count": int, "last_error": str, "last_check": str}}
-    ip_location_cache = {}  # {ip: country_code}
+    geo_cache_file = Path(args.geo_cache_file)
+    ip_location_cache = load_ip_location_cache(geo_cache_file) if args.resolve_location else {}
+    initial_ip_location_cache = dict(ip_location_cache)
+    if args.resolve_location:
+        logger.info("Loaded %s geo cache entries.", len(ip_location_cache))
 
     # Multiple iterations
     for i in range(1, args.iterations + 1):
@@ -469,9 +712,21 @@ async def main():
             args.retry_backoff,
             args.resolve_location,
             ip_location_cache,
+            args.geo_max_concurrency,
+            args.geo_retries,
+            args.geo_retry_backoff,
+            args.geo_rps,
         )
         total_oks += oks
         total_bads += bads
+
+    if args.resolve_location:
+        appended_entries = append_ip_location_cache(
+            geo_cache_file,
+            initial_ip_location_cache,
+            ip_location_cache,
+        )
+        logger.info("Appended %s geo cache entries to %s", appended_entries, geo_cache_file)
 
     # ---- Write GOOD proxies to two files ----
     # 1) Proxies WITH all observed IPs

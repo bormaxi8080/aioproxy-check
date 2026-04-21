@@ -10,6 +10,7 @@ proxies*.txt
 ok_proxies.txt
 ok_proxies_with_ip.txt
 bad_proxies.txt
+geo_ip_cache.json
 
 __pycache__
 proxy/

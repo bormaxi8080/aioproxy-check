@@ -56,6 +56,18 @@ Check Proxy List script with AsyncIO
 
 (`--resolve-location`: enabled by default; when enabled, `ok_proxies_with_ip.txt` contains IP + country code, e.g. `1.2.3.4 (DE)`)
 
+> python check_proxies.py my_proxies.txt --resolve-location --geo-max-concurrency 20 --geo-retries 3 --geo-retry-backoff 1 --geo-rps 5 --geo-cache-file geo_ip_cache.json
+
+(`--geo-max-concurrency`: limit simultaneous geolocation requests, default `20`)
+
+(`--geo-retries`: additional retries for geolocation requests, default `3`)
+
+(`--geo-retry-backoff`: base delay in seconds for geo retries, default `1.0`)
+
+(`--geo-rps`: throttle geolocation request rate; `0` disables throttling, default `5.0`)
+
+(`--geo-cache-file`: local append-only JSON cache for resolved IP countries; reused between runs)
+
 > python aioproxy_check.py my_proxies.txt --no-resolve-location
 
 > python aioproxy_check_forwarded.py
