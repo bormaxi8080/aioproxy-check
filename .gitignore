@@ -4,6 +4,8 @@
 
 *.log
 
+domains.json
+
 proxies.txt
 proxies*.txt
 
