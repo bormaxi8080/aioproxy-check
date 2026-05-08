@@ -1,101 +1,218 @@
 # aioproxy-check
 
-Check Proxy List script with AsyncIO
+Async proxy list checker for HTTP, SOCKS4, and SOCKS5 proxies.
+
+Current package version: `0.1.0`.
+
+The main checker is `check_proxies.py`. It normalizes mixed proxy list formats, checks proxy egress IPs asynchronously, optionally resolves country codes, stores reusable geolocation cache, and can run extra domain availability checks through working proxies.
 
 ## Install
 
-> uv venv .venv --python 3.12
+Create a Python 3.12 virtual environment and install dependencies with `uv`:
 
-> source .venv/bin/activate
+```bash
+uv venv --python 3.12
+uv sync
+uv run python --version
+```
 
-> uv pip install --python .venv/bin/python --upgrade -r requirements.txt
+To recreate the local virtual environment:
 
-> python --version
+```bash
+uv venv --clear --python 3.12
+uv sync
+```
+
+Alternatively, install from `requirements.txt` in an existing Python 3.12 environment:
+
+```bash
+python -m pip install -r requirements.txt
+```
 
 ## Usage
 
-> python aioproxy_check.py my_proxies.txt
+Proxy list files are loaded from the `proxy/` directory. For example, this command reads `proxy/my_proxies.txt`:
 
-(proxy list file should be in `proxy/my_proxies.txt`)
+```bash
+uv run python check_proxies.py my_proxies.txt
+```
 
-> python aioproxy_check.py my_proxies.txt --proxy-type socks4
+Use `--proxy-type` only as a fallback for entries without an explicit scheme. Lines that already start with `http://`, `https://`, `socks4://`, or `socks5://` keep their own scheme.
 
-> python check_proxies.py my_proxies.txt
+```bash
+uv run python check_proxies.py my_proxies.txt --proxy-type socks5
+uv run python check_proxies.py proxy.enabled.socks5.kuvalda.msk.txt
+```
 
-(extended checker, proxy list file should be in `proxy/my_proxies.txt`)
+Run several check rounds:
 
-> python check_proxies.py my_proxies.txt --proxy-type socks5
+```bash
+uv run python check_proxies.py my_proxies.txt --iterations 3
+```
 
-(`--proxy-type`: fallback type only for lines without scheme; default is `http`)
+Use a custom IP detection endpoint. The response may be plain text IP or JSON with `ip`, `origin`, or `query`.
 
-> python check_proxies.py proxy.enabled.socks5.kuvalda.msk.txt
+```bash
+uv run python check_proxies.py my_proxies.txt --check-url https://api.myip.com
+uv run python check_proxies.py my_proxies.txt --check-url "https://api.ipify.org?format=json"
+```
 
-(for lines with explicit scheme `socks4://...` / `socks5://...`, protocol is auto-detected from each line)
+Tune concurrency and transient error retries:
 
-> python check_proxies.py my_proxies.txt --check-url https://api.myip.com
+```bash
+uv run python check_proxies.py my_proxies.txt --max-concurrency 200 --retries 1 --retry-backoff 0.2
+```
 
-> python check_proxies.py my_proxies.txt --check-url https://api.ipify.org?format=json
+Geolocation is enabled by default. Disable it when country codes are not needed:
 
-(`--check-url`: proxy egress IP check service URL, default is `https://api.myip.com`)
+```bash
+uv run python check_proxies.py my_proxies.txt --no-resolve-location
+```
 
-(`--check-url` supports both `http://` and `https://`; with `https://` you validate HTTPS path through proxy tunnel)
+Tune geolocation lookups and cache:
 
-> python check_proxies.py my_proxies.txt --max-concurrency 200 --retries 1 --retry-backoff 0.2
+```bash
+uv run python check_proxies.py my_proxies.txt \
+  --resolve-location \
+  --geo-max-concurrency 20 \
+  --geo-retries 3 \
+  --geo-retry-backoff 1 \
+  --geo-rps 5 \
+  --geo-cache-file geo_ip_cache.json
+```
 
-(`--max-concurrency`: limit simultaneous checks to avoid socket exhaustion, default `200`)
+Run extra checks for working proxies against domains from `domains.json`:
 
-(`--retries`: additional retry attempts on transient network errors, default `1`)
+```bash
+uv run python check_proxies.py my_proxies.txt --check-domains 10
+uv run python check_proxies.py my_proxies.txt --check-domains all
+uv run python check_proxies.py my_proxies.txt \
+  --check-domains 20 \
+  --domains-file domains.json \
+  --domain-results-file domain_check_results.jsonl
+```
 
-(`--retry-backoff`: base delay in seconds between retries, default `0.2`)
+## Options
 
-> python check_proxies.py my_proxies.txt --iterations 3
+- `--proxy-type`, `-t`: fallback proxy type for scheme-less lines: `http`, `socks4`, or `socks5`. Default: `http`.
+- `--iterations`, `-i`: number of check rounds. Default: `1`.
+- `--resolve-location` / `--no-resolve-location`: write country code near each detected IP. Default: enabled.
+- `--check-url`: endpoint used to detect proxy egress IP. Default: `https://api.myip.com`.
+- `--max-concurrency`: maximum simultaneous proxy checks. Default: `200`.
+- `--retries`: additional retry attempts per proxy. Default: `1`.
+- `--retry-backoff`: base retry delay in seconds. Default: `0.2`.
+- `--geo-max-concurrency`: maximum simultaneous geolocation lookups. Default: `20`.
+- `--geo-retries`: additional retry attempts for geolocation requests. Default: `3`.
+- `--geo-retry-backoff`: base geolocation retry delay in seconds. Default: `1.0`.
+- `--geo-rps`: geolocation requests per second; `0` disables throttling. Default: `5.0`.
+- `--geo-cache-file`: append-only geolocation cache file. Default: `geo_ip_cache.json`.
+- `--check-domains`: after the main proxy check, test working proxies against `N` random domains or `all` domains from the domains file.
+- `--domains-file`: JSON file for domain checks. Default: `domains.json`.
+- `--domain-results-file`: JSON Lines output for domain check results. Default: `domain_check_results.jsonl`.
 
-> python aioproxy_check.py my_proxies.txt --iterations 3
+## Proxy Line Formats
 
-(`--iterations`: number of check rounds, default is `1`)
-
-> python aioproxy_check.py my_proxies.txt --check-url https://api.myip.com
-
-> python check_proxies.py my_proxies.txt --resolve-location
-
-> python check_proxies.py my_proxies.txt --no-resolve-location
-
-(`--resolve-location`: enabled by default; when enabled, `ok_proxies_with_ip.txt` contains IP + country code, e.g. `1.2.3.4 (DE)`)
-
-> python check_proxies.py my_proxies.txt --resolve-location --geo-max-concurrency 20 --geo-retries 3 --geo-retry-backoff 1 --geo-rps 5 --geo-cache-file geo_ip_cache.json
-
-(`--geo-max-concurrency`: limit simultaneous geolocation requests, default `20`)
-
-(`--geo-retries`: additional retries for geolocation requests, default `3`)
-
-(`--geo-retry-backoff`: base delay in seconds for geo retries, default `1.0`)
-
-(`--geo-rps`: throttle geolocation request rate; `0` disables throttling, default `5.0`)
-
-(`--geo-cache-file`: local append-only JSON cache for resolved IP countries; reused between runs)
-
-### Proxy line formats supported by `check_proxies.py`
+Supported by `check_proxies.py` and `aioproxy_check.py`:
 
 - `http://host:port`
 - `http://login:pass@host:port`
 - `socks4://host:port`
 - `socks5://host:port`
-- `host:port` (scheme-less, fallback `http` unless overridden by `--proxy-type`)
-- `host:port:login:pass` (scheme-less, fallback `http` unless overridden by `--proxy-type`)
-- `socks5://host:port:login:pass` (normalized to `socks5://login:pass@host:port`)
-- `socks4://host:port:login:pass` (normalized to `socks4://login:pass@host:port`)
+- `host:port`
+- `host:port:login:pass`
+- `login:pass:host:port`
+- `login:pass@host:port`
+- `host:port@login:pass`
+- `socks5://host:port:login:pass`
+- `socks4://host:port:login:pass`
 
-> python aioproxy_check.py my_proxies.txt --no-resolve-location
+Scheme-less entries use `--proxy-type`. Credentials are URL-encoded during normalization. Empty lines, comments, and common header rows are skipped.
 
-> python aioproxy_check_forwarded.py
+## Output Files
 
-(for forwarded proxies)
+`check_proxies.py` writes these files in the project root:
+
+- `ok_proxies_with_ip.txt`: working proxies with all observed egress IPs and country codes when geolocation is enabled.
+- `ok_proxies.txt`: working proxies only.
+- `bad_proxies.txt`: proxies that never succeeded, with fail count, last error, and last check time.
+- `actions.log`: detailed run log.
+- `geo_ip_cache.json`: append-only IP-to-country cache when geolocation is enabled.
+- `domain_check_results.jsonl`: one JSON object per proxy/domain check when `--check-domains` is used.
 
 ## Result
 
-![alt text](result1.jpg)
+Example console output:
 
-![alt text](result2.png)
+```text
+Loaded 4 proxies from proxy/my_proxies.txt (default_type_for_scheme_less=http)
+Check URL: https://api.myip.com
+Concurrency=200, retries=1, retry_backoff=0.2s
+Geo settings: concurrency=20, retries=3, retry_backoff=1.0s, rps=5.0, cache=geo_ip_cache.json
+Skipped 1 non-proxy lines (headers/comments/empty).
+Loaded 0 geo cache entries.
+Iteration 1: 100%|##########| 4/4 [00:02<00:00,  1.80it/s]
+Resolving geolocation for 2 new IPs (rate=5.00 req/s, est ~0.0 min)
+Geo lookup: 100%|##########| 2/2 [00:01<00:00,  1.53it/s]
+OK: http://user:pass@proxy-a.example:8080 -> IP: 203.0.113.10 (US)
+OK: socks5://proxy-b.example:1080 -> IP: 198.51.100.25 (DE)
+BAD: http://proxy-c.example:3128 -> TimeoutError
+BAD: http://proxy-d.example:8080 -> 403, message='Forbidden', url='https://api.myip.com'
+Iteration 1 summary: OK: 2 (50%) / BAD: 2 (50%)
+Appended 2 geo cache entries to geo_ip_cache.json
+==================================================
+FINAL SUMMARY for 1 iterations:
+Total checks: 4
+Total OK: 2
+Total BAD: 2
+Success rate: 50%
+Working proxies with IPs saved to ok_proxies_with_ip.txt
+Working proxies only saved to ok_proxies.txt
+Never-successful proxies saved to bad_proxies.txt
+==================================================
+```
+
+Example `ok_proxies_with_ip.txt`:
+
+```text
+http://user:pass@proxy-a.example:8080 -> 203.0.113.10 (US)
+socks5://proxy-b.example:1080 -> 198.51.100.25 (DE)
+```
+
+Example `bad_proxies.txt`:
+
+```text
+http://proxy-c.example:3128 | Fails: 1 | Last error: TimeoutError | Last check: 2026-05-08 23:15:00
+http://proxy-d.example:8080 | Fails: 1 | Last error: 403, message='Forbidden', url='https://api.myip.com' | Last check: 2026-05-08 23:15:01
+```
+
+Example `domain_check_results.jsonl`:
+
+```json
+{"domain": "example.com", "message": "OK", "proxy": "http://user:pass@proxy-a.example:8080", "status": true, "status_code": 200, "url": "https://example.com"}
+{"domain": "example.org", "message": "TimeoutError", "proxy": "socks5://proxy-b.example:1080", "status": false, "status_code": null, "url": "http://example.org"}
+```
+
+## Legacy Scripts
+
+`aioproxy_check.py` is a simpler checker that prints aggregate results and supports `--proxy-type`, `--iterations`, `--resolve-location` / `--no-resolve-location`, and `--check-url`.
+
+```bash
+uv run python aioproxy_check.py my_proxies.txt
+uv run python aioproxy_check.py my_proxies.txt --proxy-type socks4
+uv run python aioproxy_check.py my_proxies.txt --iterations 3 --no-resolve-location
+```
+
+`aioproxy_check_forwarded.py` is a small manual script for repeatedly checking one forwarded proxy configured inside the file.
+
+```bash
+uv run python aioproxy_check_forwarded.py
+```
+
+## Tests
+
+```bash
+uv run python -m unittest discover -s tests
+```
 
 ## Donates
 

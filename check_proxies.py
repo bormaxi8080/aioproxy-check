@@ -5,16 +5,16 @@ import asyncio
 import ipaddress
 import json
 import logging
-import re
 import ssl
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
 
 import aiohttp
 import certifi
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
+
+from proxy_parser import load_domains, load_proxy_file, normalize_proxy, select_domains
 
 try:
     from aiohttp_socks import ProxyConnector
@@ -28,13 +28,13 @@ except ImportError:
 # ------------------- CONFIGURATION -------------------
 PROXY_DIR = Path("proxy")                       # Folder with proxy lists
 PROXY_TYPES = ("http", "socks4", "socks5")
-PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 CHECK_SERVICE_URL = "https://api.myip.com"
 GEOLOOKUP_URL = "https://ipwho.is/{ip}"
 GEO_CACHE_FILE = "geo_ip_cache.json"
 OK_PROXIES_WITH_IP_FILE = "ok_proxies_with_ip.txt"  # Working proxies with all observed IPs
 OK_PROXIES_FILE = "ok_proxies.txt"             # Working proxies only (no IPs)
 BAD_PROXIES_FILE = "bad_proxies.txt"           # Proxies that never returned IP
+DOMAIN_RESULTS_FILE = "domain_check_results.jsonl"
 LOG_FILE = "actions.log"                       # Log file name
 TIMEOUT = 5                                    # Request timeout in seconds
 MAX_CONCURRENCY = 200                          # Max simultaneous proxy checks
@@ -174,81 +174,28 @@ def parse_args():
         default=GEO_CACHE_FILE,
         help="Path to local geolocation cache file (default: geo_ip_cache.json)",
     )
+    parser.add_argument(
+        "--check-domains",
+        metavar="N|all",
+        help=(
+            "Run extra checks for working proxies against N random domains or all domains "
+            "from domains.json"
+        ),
+    )
+    parser.add_argument(
+        "--domains-file",
+        default="domains.json",
+        help="Path to domains JSON file for --check-domains (default: domains.json)",
+    )
+    parser.add_argument(
+        "--domain-results-file",
+        default=DOMAIN_RESULTS_FILE,
+        help=(
+            "File for domain check results in JSON Lines format "
+            f"(default: {DOMAIN_RESULTS_FILE})"
+        ),
+    )
     return parser.parse_args()
-
-
-def normalize_proxy(proxy: str, proxy_type: str) -> str:
-    """
-    Normalize proxy line to a URL accepted by aiohttp.
-
-    Supported input formats:
-      - scheme://host:port
-      - scheme://user:pass@host:port
-      - host:port
-      - host:port:login:pass (converted to scheme://login:pass@host:port)
-    """
-    stripped = proxy.strip()
-    if not stripped:
-        return ""
-
-    # Ignore common header/comment lines in sourced lists.
-    lowered = stripped.lower()
-    if stripped.startswith("#"):
-        return ""
-    if lowered.startswith("host:port") and "login" in lowered and "pass" in lowered:
-        return ""
-
-    scheme = proxy_type.lower()
-    value = stripped
-
-    if "://" in stripped:
-        raw_scheme, value = stripped.split("://", 1)
-        lowered_scheme = raw_scheme.lower()
-        if lowered_scheme in PROXY_SCHEMES:
-            scheme = lowered_scheme
-        else:
-            return stripped
-
-    auth_match = re.fullmatch(
-        r"(?P<host>[^:\s@]+):(?P<port>\d{1,5}):(?P<login>[^:\s]+):(?P<password>[^:\s]+)",
-        value,
-    )
-    if auth_match:
-        port = int(auth_match.group("port"))
-        if 1 <= port <= 65535:
-            login = quote(auth_match.group("login"), safe="")
-            password = quote(auth_match.group("password"), safe="")
-            return (
-                f"{scheme}://{login}:{password}"
-                f"@{auth_match.group('host')}:{port}"
-            )
-
-    auth_url_match = re.fullmatch(
-        r"(?P<login>[^:\s@]+):(?P<password>[^@\s]+)@(?P<host>[^:\s@]+):(?P<port>\d{1,5})",
-        value,
-    )
-    if auth_url_match:
-        port = int(auth_url_match.group("port"))
-        if 1 <= port <= 65535:
-            login = quote(auth_url_match.group("login"), safe="")
-            password = quote(auth_url_match.group("password"), safe="")
-            return (
-                f"{scheme}://{login}:{password}"
-                f"@{auth_url_match.group('host')}:{port}"
-            )
-
-    host_port_match = re.fullmatch(
-        r"(?P<host>[^:\s@]+):(?P<port>\d{1,5})",
-        value,
-    )
-    if host_port_match:
-        port = int(host_port_match.group("port"))
-        if 1 <= port <= 65535:
-            return f"{scheme}://{host_port_match.group('host')}:{port}"
-
-    if "://" in stripped:
-        return stripped
-    return f"{scheme}://{value}"
 
 
 def extract_ip_from_response(response_body: str):
@@ -362,6 +309,111 @@ async def check_proxy(
                 await asyncio.sleep(retry_backoff * (attempt + 1))
                 continue
             return {"status": False, "message": format_error(error), "proxy": proxy}
+
+
+async def check_domain_with_proxy(
+    proxy: str,
+    domain: str,
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+):
+    """Check whether a domain opens through a working proxy."""
+    proxy_scheme = proxy.split("://", 1)[0].lower() if "://" in proxy else "http"
+    is_socks_proxy = proxy_scheme in {"socks4", "socks5"}
+    urls = [f"https://{domain}", f"http://{domain}"]
+
+    async with semaphore:
+        for url in urls:
+            try:
+                if is_socks_proxy:
+                    if ProxyConnector is None:
+                        return {
+                            "status": False,
+                            "proxy": proxy,
+                            "domain": domain,
+                            "url": url,
+                            "status_code": None,
+                            "message": (
+                                "SOCKS proxy support requires aiohttp-socks package. "
+                                "Install dependencies from requirements.txt"
+                            ),
+                        }
+                    connector = ProxyConnector.from_url(proxy)
+                    async with aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=session.timeout,
+                    ) as socks_session:
+                        async with socks_session.get(url=url, ssl=ssl_ctx) as response:
+                            return {
+                                "status": response.status < 500,
+                                "proxy": proxy,
+                                "domain": domain,
+                                "url": url,
+                                "status_code": response.status,
+                                "message": response.reason,
+                            }
+                async with session.get(url=url, proxy=proxy, ssl=ssl_ctx) as response:
+                    return {
+                        "status": response.status < 500,
+                        "proxy": proxy,
+                        "domain": domain,
+                        "url": url,
+                        "status_code": response.status,
+                        "message": response.reason,
+                    }
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ssl.SSLError,
+                SocksProxyError,
+                OSError,
+            ) as error:
+                last_error = error
+
+        return {
+            "status": False,
+            "proxy": proxy,
+            "domain": domain,
+            "url": urls[-1],
+            "status_code": None,
+            "message": format_error(last_error),
+        }
+
+
+async def run_domain_checks(proxies, domains, max_concurrency: int, output_file: Path):
+    """Run domain checks for working proxies and save JSON Lines results."""
+    if not proxies or not domains:
+        return []
+
+    results = []
+    semaphore = asyncio.Semaphore(max_concurrency)
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrency,
+        limit_per_host=max_concurrency,
+    )
+    client_timeout = aiohttp.ClientTimeout(total=TIMEOUT)
+
+    async with aiohttp.ClientSession(connector=connector, timeout=client_timeout) as session:
+        checks = [(proxy, domain) for proxy in proxies for domain in domains]
+        batch_size = max(max_concurrency * 10, max_concurrency)
+        with tqdm(total=len(checks), desc="Domain checks") as progress:
+            for start in range(0, len(checks), batch_size):
+                batch = checks[start:start + batch_size]
+                tasks = [
+                    asyncio.create_task(check_domain_with_proxy(proxy, domain, session, semaphore))
+                    for proxy, domain in batch
+                ]
+                for task in asyncio.as_completed(tasks):
+                    result = await task
+                    results.append(result)
+                    progress.update(1)
+
+    with open(output_file, "w", encoding="utf-8") as file_obj:
+        for result in results:
+            file_obj.write(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            file_obj.write("\n")
+
+    return results
 
 
 class AsyncRateLimiter:
@@ -714,6 +766,16 @@ async def main():
     if args.geo_rps < 0:
         logger.error("geo-rps must be >= 0.")
         return
+    if args.check_domains is not None:
+        if args.check_domains != "all":
+            try:
+                domain_check_count = int(args.check_domains)
+            except ValueError:
+                logger.error("check-domains must be a positive integer or 'all'.")
+                return
+            if domain_check_count < 1:
+                logger.error("check-domains count must be >= 1.")
+                return
     check_url_lower = args.check_url.lower()
     if not check_url_lower.startswith(("http://", "https://")):
         logger.error("check-url must start with http:// or https://")
@@ -723,15 +785,7 @@ async def main():
 
     # Load proxies from file
     try:
-        with open(proxy_file, "r", encoding="utf-8") as f:
-            proxy_list = []
-            skipped_lines = 0
-            for line in f:
-                normalized = normalize_proxy(line, args.proxy_type)
-                if normalized:
-                    proxy_list.append(normalized)
-                else:
-                    skipped_lines += 1
+        proxy_list, skipped_lines = load_proxy_file(proxy_file, args.proxy_type)
     except FileNotFoundError:
         logger.error("Proxy file '%s' not found.", proxy_file)
         return
@@ -827,6 +881,44 @@ async def main():
         "\n".join(proxy for proxy in sorted(all_ok_proxies.keys())),
         encoding="utf-8",
     )
+
+    domain_results = []
+    if args.check_domains:
+        domains_file = Path(args.domains_file)
+        try:
+            domains = load_domains(domains_file)
+            selected_domains = select_domains(domains, args.check_domains)
+        except FileNotFoundError:
+            logger.error("Domains file '%s' not found.", domains_file)
+            selected_domains = []
+        except (json.JSONDecodeError, ValueError) as error:
+            logger.error("Failed to load domains from %s: %s", domains_file, error)
+            selected_domains = []
+
+        if selected_domains and all_ok_proxies:
+            logger.info("%s", "=" * 50)
+            logger.info(
+                "DOMAIN CHECKS: %s working proxies x %s domains",
+                len(all_ok_proxies),
+                len(selected_domains),
+            )
+            domain_results = await run_domain_checks(
+                sorted(all_ok_proxies.keys()),
+                selected_domains,
+                args.max_concurrency,
+                Path(args.domain_results_file),
+            )
+            domain_ok = sum(1 for result in domain_results if result["status"])
+            domain_bad = len(domain_results) - domain_ok
+            logger.info("Domain OK: %s / BAD: %s", domain_ok, domain_bad)
+            logger.info("Domain check results saved to %s", args.domain_results_file)
+        elif args.check_domains:
+            Path(args.domain_results_file).write_text("", encoding="utf-8")
+            logger.info(
+                "Domain checks skipped: %s working proxies, %s selected domains.",
+                len(all_ok_proxies),
+                len(selected_domains),
+            )
 
     # ---- Write NEVER-SUCCESSFUL proxies (sorted by fails desc) ----
     never_ok = {

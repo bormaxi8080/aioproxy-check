@@ -3,14 +3,13 @@
 import argparse
 import asyncio
 import json
-import re
 import ssl
 from pathlib import Path
-from urllib.parse import quote
 
 import aiohttp
 import certifi
 
+from proxy_parser import load_proxy_file
 from utils import DEFAULT_CHECK_URL, get_starship
 
 PROXY_DIR = Path("proxy")
@@ -58,44 +57,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def normalize_proxy(proxy: str, proxy_type: str) -> str:
-    """
-    Normalize proxy line to a URL accepted by aiohttp.
-
-    Supported input formats:
-      - scheme://host:port
-      - scheme://user:pass@host:port
-      - host:port
-      - host:port:login:pass (converted to scheme://login:pass@host:port)
-    """
-    stripped = proxy.strip()
-    if not stripped:
-        return ""
-
-    lowered = stripped.lower()
-    if stripped.startswith("#"):
-        return ""
-    if lowered.startswith("host:port") and "login" in lowered and "pass" in lowered:
-        return ""
-
-    if "://" in stripped:
-        return stripped
-    auth_match = re.fullmatch(
-        r"(?P<host>[^:\s]+):(?P<port>\d{1,5}):(?P<login>[^:\s]+):(?P<password>[^:\s]+)",
-        stripped,
-    )
-    if auth_match:
-        port = int(auth_match.group("port"))
-        if 1 <= port <= 65535:
-            login = quote(auth_match.group("login"), safe="")
-            password = quote(auth_match.group("password"), safe="")
-            return (
-                f"{proxy_type}://{login}:{password}"
-                f"@{auth_match.group('host')}:{port}"
-            )
-    return f"{proxy_type}://{stripped}"
-
-
 async def main():
     """Run proxy checks from a file and print aggregate results."""
     args = parse_args()
@@ -104,21 +65,13 @@ async def main():
         return
 
     tasks = []
-    proxy_list = []
     total_oks = 0
     total_bads = 0
     ip_location_cache = {}
 
     proxy_file_path = PROXY_DIR / Path(args.proxy_file_name).name
 
-    skipped_lines = 0
-    with open(proxy_file_path, "r", encoding="utf-8") as proxy_file:
-        for line in proxy_file:
-            normalized = normalize_proxy(line, args.proxy_type)
-            if normalized:
-                proxy_list.append(normalized)
-            else:
-                skipped_lines += 1
+    proxy_list, skipped_lines = load_proxy_file(proxy_file_path, args.proxy_type)
 
     print(f"Loaded {len(proxy_list)} proxies from {proxy_file_path} (proxy_type={args.proxy_type})")
     print(f"Check URL: {args.check_url}")
